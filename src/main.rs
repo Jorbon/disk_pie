@@ -30,7 +30,7 @@ struct DirEntry(String, u64, Option<Vec<DirEntry>>);
 
 use std::os::windows::fs::MetadataExt;
 
-fn scan_dir(path: &std::path::PathBuf) -> (Vec<DirEntry>, u64) {
+fn scan_dir(path: &std::path::PathBuf) -> (u64, Vec<DirEntry>) {
     match std::fs::read_dir(path) {
         Ok(dir) => {
             let mut size = 0;
@@ -38,7 +38,7 @@ fn scan_dir(path: &std::path::PathBuf) -> (Vec<DirEntry>, u64) {
             let dir_entries = dir.map(|entry| {
                 let entry = entry.unwrap();
                 if entry.metadata().unwrap().is_dir() {
-                    let (subdir_entries, subdir_size) = scan_dir(&entry.path());
+                    let (subdir_size, subdir_entries) = scan_dir(&entry.path());
                     size += subdir_size;
                     DirEntry(entry.file_name().into_string().unwrap(), subdir_size, Some(subdir_entries))
                 } else {
@@ -48,51 +48,109 @@ fn scan_dir(path: &std::path::PathBuf) -> (Vec<DirEntry>, u64) {
                 }
             }).collect();
             
-            (dir_entries, size)
+            (size, dir_entries)
         }
         Err(e) => {
             println!("{e} : {}", path.display());
-            (vec![], 0)
+            (0, vec![])
         }
     }
 }
 
 
 
-const COLOR_TABLE: [Color; 9] = [
-    Color::CYAN,
-    Color::YELLOW,
-    Color::RED,
-    Color::GRAY,
-    Color::GREEN,
-    Color::BLUE,
-    Color::LIGHT_GRAY,
-    Color::MAGENTA,
-    Color::DARK_GRAY,
-];
 
-static mut NEXT_COLOR_INDEX: usize = COLOR_TABLE.len() - 1;
+fn from_hsv(mut h: f32, s: f32, v: f32) -> Color {
+    let max = v;
+    let c = s*v;
+    let min = max - c;
+    h = (h % 1.0) * 6.0;
+         if h < 1.0 { Color::from_rgb(max, min + h*c, min) }
+    else if h < 2.0 { Color::from_rgb(min + (2.0 - h)*c, max, min) }
+    else if h < 3.0 { Color::from_rgb(min, max, min + (h - 2.0)*c) }
+    else if h < 4.0 { Color::from_rgb(min, min + (4.0 - h)*c, max) }
+    else if h < 5.0 { Color::from_rgb(min + (h - 4.0)*c, min, max) }
+    else            { Color::from_rgb(max, min, min + (6.0 - h)*c) }
+}
 
-fn reset_color() {
+
+
+const N: f32 = 5.0;
+
+const INCREMENT: f32 = 2.0*PI / 360.0;
+
+static mut COLOR_COUNT: u32 = 0;
+
+fn next_color_count() -> f32 {
     unsafe {
-        NEXT_COLOR_INDEX = COLOR_TABLE.len() - 1;
+        COLOR_COUNT += 1;
+        COLOR_COUNT as f32
     }
 }
 
-fn next_color() -> Color {
+fn reset_color_count() {
     unsafe {
-        NEXT_COLOR_INDEX += 1;
-        if NEXT_COLOR_INDEX >= COLOR_TABLE.len() {
-            NEXT_COLOR_INDEX = 0;
+        COLOR_COUNT = 0;
+    }
+}
+
+
+
+fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, scale: f32, distance: u32, center_pos: Vec2, start_angle: f32, end_angle: f32, dir_borders: bool) {
+    let radius = match dir_entry.2 {
+        Some(_) => N - N * f32::powi((N-1.0) / N, distance as i32),
+        None => N
+    };
+    
+    if let Some(subdir_entries) = &dir_entry.2 {
+        let mut angle = start_angle;
+        for subdir_entry in subdir_entries {
+            let next_angle = angle + subdir_entry.1 as f32 / dir_entry.1 as f32 * (end_angle - start_angle);
+            draw_dir_entry(graphics, &subdir_entry, scale, distance + 1, center_pos, angle, next_angle, true);
+            angle = next_angle;
         }
-        COLOR_TABLE[NEXT_COLOR_INDEX]
+    }
+    
+    
+    let mut points = vec![(0.0, 0.0)];
+    let mut angle = start_angle;
+    while angle < end_angle {
+        points.push((scale * radius * f32::cos(angle), scale * radius * f32::sin(angle)));
+        angle += INCREMENT;
+    }
+    points.push((scale * radius * f32::cos(end_angle), scale * radius * f32::sin(end_angle)));
+    
+    graphics.draw_polygon(&Polygon::new(&points), center_pos, from_hsv(0.65 + 0.04 * distance as f32, 0.7, (next_color_count() * PI) % 0.7 + 0.3));
+    
+    if dir_entry.2.is_some() {
+        let mut angle = start_angle;
+        while angle + INCREMENT < end_angle {
+            graphics.draw_line(
+                center_pos + Vec2::new(angle.cos(), angle.sin()) * scale * radius,
+                center_pos + Vec2::new((angle + INCREMENT).cos(), (angle + INCREMENT).sin()) * scale * radius,
+            0.1 * scale / distance as f32, Color::BLACK);
+            angle += INCREMENT;
+        }
+        graphics.draw_line(
+            center_pos + Vec2::new(angle.cos(), angle.sin()) * scale * radius,
+            center_pos + Vec2::new(end_angle.cos(), end_angle.sin()) * scale * radius,
+        0.1 * scale / distance as f32, Color::BLACK);
+    }
+    
+    if dir_borders && dir_entry.2.is_some() {
+        graphics.draw_line(center_pos,
+            center_pos + Vec2::new(start_angle.cos(), start_angle.sin()) * scale * N,
+        (0.02 * scale / distance as f32).clamp(1.0, 4.0), Color::BLACK);
+        graphics.draw_line(center_pos,
+            center_pos + Vec2::new(end_angle.cos(), end_angle.sin()) * scale * N,
+        (0.02 * scale / distance as f32).clamp(1.0, 4.0), Color::BLACK);
     }
 }
 
 
 
 struct MyWindowHandler {
-    drive: (Vec<DirEntry>, u64),
+    root: DirEntry,
     center_pos: Vec2,
     scale: f32,
     mouse_left: bool,
@@ -100,6 +158,49 @@ struct MyWindowHandler {
     mouse_right: bool,
     mouse_pos: Vec2,
     window_size: UVec2,
+}
+
+impl MyWindowHandler {
+    fn bound_view(&mut self) {
+        let min_scale = u32::min(self.window_size.x, self.window_size.y) as f32 / (2.0 * (N + 1.0));
+        if self.scale < min_scale {
+            self.scale = min_scale;
+        }
+        
+        let (left, right, top, bottom) = if self.window_size.x > self.window_size.y {
+            (
+                (self.window_size.x as f32 - self.window_size.y as f32) / 2.0,
+                (self.window_size.x as f32 + self.window_size.y as f32) / 2.0,
+                0.0,
+                self.window_size.y as f32,
+            )
+        } else {
+            (
+                0.0,
+                self.window_size.x as f32,
+                (self.window_size.y as f32 - self.window_size.x as f32) / 2.0,
+                (self.window_size.y as f32 + self.window_size.x as f32) / 2.0,
+            )
+        };
+        
+        let center_pos_x_max = left + self.scale * (N + 1.0);
+        if self.center_pos.x > center_pos_x_max {
+            self.center_pos.x = center_pos_x_max;
+        }
+        let center_pos_x_min = right - self.scale * (N + 1.0);
+        if self.center_pos.x < center_pos_x_min {
+            self.center_pos.x = center_pos_x_min;
+        }
+        
+        let center_pos_y_max = top + self.scale * (N + 1.0);
+        if self.center_pos.y > center_pos_y_max {
+            self.center_pos.y = center_pos_y_max;
+        }
+        let center_pos_y_min = bottom - self.scale * (N + 1.0);
+        if self.center_pos.y < center_pos_y_min {
+            self.center_pos.y = center_pos_y_min;
+        }
+    }
 }
 
 impl WindowHandler for MyWindowHandler {
@@ -122,6 +223,7 @@ impl WindowHandler for MyWindowHandler {
     fn on_mouse_move(&mut self, _helper: &mut WindowHelper<()>, position: Vec2) {
         if self.mouse_left {
             self.center_pos += position - self.mouse_pos;
+            self.bound_view();
         }
         
         self.mouse_pos = position;
@@ -132,6 +234,7 @@ impl WindowHandler for MyWindowHandler {
             let ratio = 1.0 + 0.1 * delta as f32;
             self.scale *= ratio;
             self.center_pos = self.mouse_pos + (self.center_pos - self.mouse_pos) * ratio;
+            self.bound_view();
         }
     }
     
@@ -139,29 +242,23 @@ impl WindowHandler for MyWindowHandler {
         self.scale *= size_pixels.y as f32 / self.window_size.y as f32;
         self.center_pos.x += (size_pixels.x as f32 - self.window_size.x as f32) / 2.0;
         self.center_pos.y += (size_pixels.y as f32 - self.window_size.y as f32) / 2.0;
-        
         self.window_size = size_pixels;
+        self.bound_view();
     }
     
     
     fn on_draw(&mut self, helper: &mut WindowHelper<()>, graphics: &mut Graphics2D) {
-        graphics.clear_screen(Color::BLACK);
-        reset_color();
+        graphics.clear_screen(Color::DARK_GRAY);
+        reset_color_count();
         
-        let mut progress = 0.0;
-        for dir_entry in &self.drive.0 {
-            let next_progress = progress + dir_entry.1 as f32 / self.drive.1 as f32 * 2.0*PI;
-            const INCREMENT: f32 = 2.0*PI / 360.0;
-            
-            let mut points = vec![(0.0, 0.0)];
-            while progress < next_progress {
-                points.push((self.scale * f32::cos(progress), self.scale * f32::sin(progress)));
-                progress += INCREMENT;
-            }
-            progress = next_progress;
-            points.push((self.scale * f32::cos(progress), self.scale * f32::sin(progress)));
-            
-            graphics.draw_polygon(&Polygon::new(&points), (self.center_pos.x, self.center_pos.y), next_color());
+        draw_dir_entry(graphics, &self.root, self.scale, 1, self.center_pos, 0.0, 2.0*PI, false);
+        
+        for angle in 0..360 {
+            let angle = angle as f32 * PI/180.0;
+            graphics.draw_line(
+                self.center_pos + Vec2::new(angle.cos(), angle.sin()) * self.scale * N,
+                self.center_pos + Vec2::new((angle + INCREMENT).cos(), (angle + INCREMENT).sin()) * self.scale * N,
+            0.05 * self.scale, Color::BLACK);
         }
         
         helper.request_redraw();
@@ -176,8 +273,13 @@ fn main() {
     let window_size = UVec2::new(1000, 1000);
     let window = Window::new_centered("Disk Pie", window_size).unwrap();
     
+    let root_folder = "C:\\Users\\benap\\";
+    
     window.run_loop(MyWindowHandler {
-        drive: scan_dir(&std::path::PathBuf::from("C:\\Users\\benap\\OneDrive\\big\\RWBY")),
+        root: {
+            let (size, dirs) = scan_dir(&std::path::PathBuf::from(root_folder));
+            DirEntry(String::from(root_folder), size, Some(dirs))
+        },
         center_pos: Vec2::new(window_size.x as f32 / 2.0, window_size.y as f32 / 2.0),
         scale: window_size.y as f32 / 12.0,
         mouse_left: false,

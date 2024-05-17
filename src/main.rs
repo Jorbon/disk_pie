@@ -3,6 +3,7 @@ extern crate winapi;
 use std::f32::consts::PI;
 use std::os::windows::ffi::OsStrExt;
 use std::io::Error;
+use std::sync::{Arc, Mutex};
 use speedy2d::color::Color;
 use speedy2d::dimen::{UVec2, Vec2};
 use speedy2d::shape::Polygon;
@@ -25,28 +26,77 @@ fn get_disk_size<P: AsRef<std::path::Path>>(path: P) -> Result<u64, Error> {
 
 
 
-struct DirEntry(String, u64, Option<Vec<DirEntry>>);
+#[derive(Clone, Default)]
+struct DirEntry {
+    name: String,
+    size: u64,
+    subdir: Option<Vec<DirEntry>>,
+}
 
+const MAX_THREAD_COUNT: u32 = 16;
 
 use std::os::windows::fs::MetadataExt;
 
-fn scan_dir(path: &std::path::PathBuf) -> (u64, Vec<DirEntry>) {
+fn scan_dir(path: &std::path::PathBuf, thread_count_mutex: &Arc<Mutex<u32>>) -> (u64, Vec<DirEntry>) {
     match std::fs::read_dir(path) {
         Ok(dir) => {
-            let mut size = 0;
+            let dir = dir.map(|entry| entry.unwrap()).collect::<Vec<_>>();
             
-            let dir_entries = dir.map(|entry| {
-                let entry = entry.unwrap();
+            let mut threads = vec![];
+            let dir_entries_mutex = &Arc::new(Mutex::new(vec![DirEntry::default(); dir.len()]));
+            
+            for i in 0..dir.len() {
+                let entry = &dir[i];
+                let file_name = entry.file_name().into_string().unwrap();
+                let file_size;
+                
                 if entry.metadata().unwrap().is_dir() {
-                    let (subdir_size, subdir_entries) = scan_dir(&entry.path());
-                    size += subdir_size;
-                    DirEntry(entry.file_name().into_string().unwrap(), subdir_size, Some(subdir_entries))
+                    let mut thread_count = thread_count_mutex.lock().unwrap();
+                    if *thread_count < MAX_THREAD_COUNT {
+                        *thread_count += 1;
+                        drop(thread_count);
+                        
+                        let path = entry.path();
+                        let thread_count_mutex_share = Arc::clone(thread_count_mutex);
+                        let dir_entries_mutex_share = Arc::clone(dir_entries_mutex);
+                        threads.push(std::thread::spawn(move || {
+                            let subdir_scan = scan_dir(&path, &thread_count_mutex_share);
+                            dir_entries_mutex_share.lock().unwrap()[i] = DirEntry {
+                                name: file_name,
+                                size: subdir_scan.0,
+                                subdir: Some(subdir_scan.1)
+                            };
+                        }));
+                    } else {
+                        drop(thread_count);
+                        let subdir_scan = scan_dir(&entry.path(), thread_count_mutex);
+                        dir_entries_mutex.lock().unwrap()[i] = DirEntry {
+                            name: file_name,
+                            size: subdir_scan.0,
+                            subdir: Some(subdir_scan.1)
+                        };
+                    }
                 } else {
-                    let file_size = get_disk_size(entry.path()).unwrap_or_else(|_| entry.metadata().unwrap().file_size());
-                    size += file_size;
-                    DirEntry(entry.file_name().into_string().unwrap(), file_size, None)
+                    file_size = get_disk_size(entry.path()).unwrap_or_else(|_| entry.metadata().unwrap().file_size());
+                    dir_entries_mutex.lock().unwrap()[i] = DirEntry {
+                        name: file_name,
+                        size: file_size,
+                        subdir: None
+                    };
                 }
-            }).collect();
+            }
+            
+            for thread in threads {
+                thread.join().unwrap();
+                *thread_count_mutex.lock().unwrap() -= 1;
+            }
+            
+            let dir_entries = (*dir_entries_mutex.lock().unwrap()).clone();
+            
+            let mut size = 0;
+            for dir_entry in dir_entries.iter() {
+                size += dir_entry.size;
+            }
             
             (size, dir_entries)
         }
@@ -97,15 +147,15 @@ fn reset_color_count() {
 
 
 fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, scale: f32, distance: u32, center_pos: Vec2, start_angle: f32, end_angle: f32, dir_borders: bool) {
-    let radius = match dir_entry.2 {
+    let radius = match dir_entry.subdir {
         Some(_) => N - N * f32::powi((N-1.0) / N, distance as i32),
         None => N
     };
     
-    if let Some(subdir_entries) = &dir_entry.2 {
+    if let Some(subdir_entries) = &dir_entry.subdir {
         let mut angle = start_angle;
         for subdir_entry in subdir_entries {
-            let next_angle = angle + subdir_entry.1 as f32 / dir_entry.1 as f32 * (end_angle - start_angle);
+            let next_angle = angle + subdir_entry.size as f32 / dir_entry.size as f32 * (end_angle - start_angle);
             draw_dir_entry(graphics, &subdir_entry, scale, distance + 1, center_pos, angle, next_angle, true);
             angle = next_angle;
         }
@@ -122,7 +172,7 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, scale: f32, d
     
     graphics.draw_polygon(&Polygon::new(&points), center_pos, from_hsv(0.65 + 0.04 * distance as f32, 0.7, (next_color_count() * PI) % 0.7 + 0.3));
     
-    if dir_entry.2.is_some() {
+    if dir_entry.subdir.is_some() {
         let mut angle = start_angle;
         while angle + INCREMENT < end_angle {
             graphics.draw_line(
@@ -137,7 +187,7 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, scale: f32, d
         0.1 * scale / distance as f32, Color::BLACK);
     }
     
-    if dir_borders && dir_entry.2.is_some() {
+    if dir_borders && dir_entry.subdir.is_some() {
         graphics.draw_line(center_pos,
             center_pos + Vec2::new(start_angle.cos(), start_angle.sin()) * scale * N,
         (0.02 * scale / distance as f32).clamp(1.0, 4.0), Color::BLACK);
@@ -273,12 +323,16 @@ fn main() {
     let window_size = UVec2::new(1000, 1000);
     let window = Window::new_centered("Disk Pie", window_size).unwrap();
     
-    let root_folder = "C:\\Users\\benap\\";
+    let root_folder = "C:\\Users\\benap";
     
     window.run_loop(MyWindowHandler {
         root: {
-            let (size, dirs) = scan_dir(&std::path::PathBuf::from(root_folder));
-            DirEntry(String::from(root_folder), size, Some(dirs))
+            let (size, dirs) = scan_dir(&std::path::PathBuf::from(root_folder), &Arc::new(Mutex::new(1)));
+            DirEntry {
+                name: String::from(root_folder),
+                size,
+                subdir: Some(dirs)
+            }
         },
         center_pos: Vec2::new(window_size.x as f32 / 2.0, window_size.y as f32 / 2.0),
         scale: window_size.y as f32 / 12.0,

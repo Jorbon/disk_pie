@@ -208,7 +208,7 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindow
     }
     points.push((wh.scale * radius * f32::cos(end_angle), wh.scale * radius * f32::sin(end_angle)));
     
-    graphics.draw_polygon(&Polygon::new(&points), wh.center_pos, from_hsv(0.65 + 0.04 * distance as f32, 0.7, (dir_entry.color * PI) % 0.7 + 0.3));
+    graphics.draw_polygon(&Polygon::new(&points), wh.center_pos, from_hsv(0.65 + 0.04 * (distance as f32 + wh.current_dir_path.len() as f32), 0.7, (dir_entry.color * PI) % 0.7 + 0.3));
     
     if dir_entry.subdir.is_some() {
         let thickness = 0.1 * wh.scale / distance as f32;
@@ -244,6 +244,7 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindow
 struct MyWindowHandler {
     root: DirEntry,
     font: Font,
+    current_dir_path: Vec<usize>,
     center_pos: Vec2,
     scale: f32,
     mouse_left: bool,
@@ -364,7 +365,33 @@ impl MyWindowHandler {
 impl WindowHandler for MyWindowHandler {
     fn on_mouse_button_down(&mut self, _helper: &mut WindowHelper<()>, button: MouseButton) {
         match button {
-            MouseButton::Left => self.mouse_left = true,
+            MouseButton::Left => {
+                self.mouse_left = true;
+                
+                let mouse_angle = f32::atan2(self.mouse_pos.y - self.center_pos.y, self.mouse_pos.x - self.center_pos.x);
+                let mouse_angle = if mouse_angle < 0.0 { mouse_angle + 2.0*PI } else { mouse_angle };
+                let mouse_radius = (self.mouse_pos - self.center_pos).magnitude() / self.scale;
+                
+                if mouse_radius <= N {
+                    let mut current_node = &self.root;
+                    for index in &self.current_dir_path {
+                        if let Some(subdir) = &current_node.subdir {
+                            current_node = &subdir[*index];
+                        } else {
+                            break;
+                        }
+                    }
+                    
+                    let mut index_path = self.find_file(current_node, mouse_angle, mouse_radius, 1, 0.0, 2.0*PI);
+                    if index_path.len() == 0 {
+                        self.current_dir_path.pop();
+                    } else {
+                        index_path.reverse();
+                        self.current_dir_path.append(&mut index_path);
+                    }
+                    
+                }
+            }
             MouseButton::Middle => self.mouse_middle = true,
             MouseButton::Right => self.mouse_right = true,
             MouseButton::Other(_) => ()
@@ -406,10 +433,23 @@ impl WindowHandler for MyWindowHandler {
     
     
     fn on_draw(&mut self, helper: &mut WindowHelper<()>, graphics: &mut Graphics2D) {
+        
+        let mut current_dir_name = self.root.name.clone();
+        
+        let mut current_node = &self.root;
+        for index in &self.current_dir_path {
+            if let Some(subdir) = &current_node.subdir {
+                current_node = &subdir[*index];
+                current_dir_name = current_dir_name + "\\" + &current_node.name;
+            } else {
+                break;
+            }
+        }
+        
         graphics.clear_screen(Color::DARK_GRAY);
         reset_color_count();
         
-        draw_dir_entry(graphics, &self.root, self, 1, 0.0, 2.0*PI, false, true);
+        draw_dir_entry(graphics, current_node, self, 1, 0.0, 2.0*PI, false, true);
         
         for angle in 0..360 {
             let angle = angle as f32 * PI/180.0;
@@ -423,33 +463,42 @@ impl WindowHandler for MyWindowHandler {
         let mouse_angle = if mouse_angle < 0.0 { mouse_angle + 2.0*PI } else { mouse_angle };
         let mouse_radius = (self.mouse_pos - self.center_pos).magnitude() / self.scale;
         
+        let mut file_name;
+        let mut node = current_node;
+        
         if mouse_radius <= N {
-            let mut file_name = self.root.name.clone();
-            let index_path = self.find_file(&self.root, mouse_angle, mouse_radius, 1, 0.0, 2.0*PI);
-            let mut node = &self.root;
-            for index in index_path.iter().rev() {
-                if let Some(subdir) = &node.subdir {
-                    node = &subdir[*index];
-                    file_name = file_name + "\\" + &node.name;
-                } else {
-                    break
+            let index_path = self.find_file(current_node, mouse_angle, mouse_radius, 1, 0.0, 2.0*PI);
+            
+            if index_path.len() == 0 {
+                file_name = current_dir_name;
+            } else {
+                file_name = current_node.name.clone();
+                for index in index_path.iter().rev() {
+                    if let Some(subdir) = &node.subdir {
+                        node = &subdir[*index];
+                        file_name = file_name + "\\" + &node.name;
+                    } else {
+                        break
+                    }
                 }
             }
-            
-            const METRIC_PREFIXES: [&str; 8] = ["", "K", "M", "G", "T", "P", "E", "Y"];
-            
-            let mut bytes = node.size as f32;
-            let mut prefix_index = 0;
-            while bytes >= 1024.0 {
-                bytes /= 1024.0;
-                prefix_index += 1;
-            }
-            
-            graphics.draw_text((12.0, self.window_size.y as f32 - 72.0), Color::WHITE, &self.font.layout_text(
-                &(bytes.to_string().get(..5).unwrap_or(&bytes.to_string()).to_owned() + " " + METRIC_PREFIXES[prefix_index] + "B"),
-            30.0, TextOptions::new()));
-            graphics.draw_text((12.0, self.window_size.y as f32 - 36.0), Color::WHITE, &self.font.layout_text(&file_name, 30.0, TextOptions::new()));
+        } else {
+            file_name = current_dir_name;
         }
+        
+        const METRIC_PREFIXES: [&str; 8] = ["", "K", "M", "G", "T", "P", "E", "Y"];
+        
+        let mut bytes = node.size as f32;
+        let mut prefix_index = 0;
+        while bytes >= 1024.0 {
+            bytes /= 1024.0;
+            prefix_index += 1;
+        }
+        
+        graphics.draw_text((12.0, self.window_size.y as f32 - 72.0), Color::WHITE, &self.font.layout_text(
+            &(bytes.to_string().get(..5).unwrap_or(&bytes.to_string()).to_owned() + " " + METRIC_PREFIXES[prefix_index] + "B"),
+        30.0, TextOptions::new()));
+        graphics.draw_text((12.0, self.window_size.y as f32 - 36.0), Color::WHITE, &self.font.layout_text(&file_name, 30.0, TextOptions::new()));
         
         helper.request_redraw();
     }
@@ -476,6 +525,7 @@ fn main() {
             }
         },
         font: Font::new(include_bytes!("OpenSans-Regular.ttf")).unwrap(),
+        current_dir_path: vec![],
         center_pos: Vec2::new(window_size.x as f32 / 2.0, window_size.y as f32 / 2.0),
         scale: window_size.y as f32 / 12.0,
         mouse_left: false,

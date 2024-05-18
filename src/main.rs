@@ -334,28 +334,30 @@ impl MyWindowHandler {
         }
     }
     
-    fn find_file(&self, dir_entry: &DirEntry, select_angle: f32, select_radius: f32, distance: u32, start_angle: f32, end_angle: f32) -> String {
+    fn find_file(&self, dir_entry: &DirEntry, select_angle: f32, select_radius: f32, distance: u32, start_angle: f32, end_angle: f32) -> Vec<usize> {
         let radius = match dir_entry.subdir.is_some() {
             true => N - N * f32::powi((N-1.0) / N, distance as i32),
             false => N
         };
         
         if select_radius < radius {
-            return dir_entry.name.clone()
+            return vec![]
         }
         
         if let Some(subdir_entries) = &dir_entry.subdir {
             let mut angle = start_angle;
-            for subdir_entry in subdir_entries {
-                let angle_delta = subdir_entry.size as f32 / dir_entry.size as f32 * (end_angle - start_angle);
+            for i in 0..subdir_entries.len() {
+                let angle_delta = subdir_entries[i].size as f32 / dir_entry.size as f32 * (end_angle - start_angle);
                 if angle + angle_delta > select_angle {
-                    return dir_entry.name.clone() + "\\" + &self.find_file(subdir_entry, select_angle, select_radius, distance + 1, angle, angle + angle_delta)
+                    let mut v = self.find_file(&subdir_entries[i], select_angle, select_radius, distance + 1, angle, angle + angle_delta);
+                    v.push(i);
+                    return v
                 }
                 angle += angle_delta;
             }
         }
         
-        return dir_entry.name.clone()
+        return vec![]
     }
 }
 
@@ -422,7 +424,30 @@ impl WindowHandler for MyWindowHandler {
         let mouse_radius = (self.mouse_pos - self.center_pos).magnitude() / self.scale;
         
         if mouse_radius <= N {
-            let file_name = self.find_file(&self.root, mouse_angle, mouse_radius, 1, 0.0, 2.0*PI);
+            let mut file_name = self.root.name.clone();
+            let index_path = self.find_file(&self.root, mouse_angle, mouse_radius, 1, 0.0, 2.0*PI);
+            let mut node = &self.root;
+            for index in index_path.iter().rev() {
+                if let Some(subdir) = &node.subdir {
+                    node = &subdir[*index];
+                    file_name = file_name + "\\" + &node.name;
+                } else {
+                    break
+                }
+            }
+            
+            const METRIC_PREFIXES: [&str; 8] = ["", "K", "M", "G", "T", "P", "E", "Y"];
+            
+            let mut bytes = node.size as f32;
+            let mut prefix_index = 0;
+            while bytes >= 1024.0 {
+                bytes /= 1024.0;
+                prefix_index += 1;
+            }
+            
+            graphics.draw_text((12.0, self.window_size.y as f32 - 72.0), Color::WHITE, &self.font.layout_text(
+                &(bytes.to_string().get(..5).unwrap_or(&bytes.to_string()).to_owned() + " " + METRIC_PREFIXES[prefix_index] + "B"),
+            30.0, TextOptions::new()));
             graphics.draw_text((12.0, self.window_size.y as f32 - 36.0), Color::WHITE, &self.font.layout_text(&file_name, 30.0, TextOptions::new()));
         }
         
@@ -444,7 +469,7 @@ fn main() {
         root: {
             let (size, dirs) = scan_dir(&std::path::PathBuf::from(root_folder), &Arc::new(Mutex::new(1)));
             DirEntry {
-                name: String::from(root_folder),
+                name: String::from(root_folder.strip_suffix("\\").unwrap_or(&root_folder)),
                 size,
                 color: next_color_count(),
                 subdir: Some(dirs)

@@ -153,7 +153,7 @@ fn reset_color_count() {
 
 
 
-fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindowHandler, distance: u32, start_angle: f32, end_angle: f32, dir_borders: bool, enable_recursion: bool) {
+fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindowHandler, distance: u32, start_angle: f32, end_angle: f32, enable_recursion: bool) {
     if wh.cull_min_angle > wh.cull_max_angle {
         if start_angle > wh.cull_max_angle && end_angle < wh.cull_min_angle { return }
     } else {
@@ -176,12 +176,12 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindow
                 let angle_delta = subdir_entry.size as f32 / dir_entry.size as f32 * (end_angle - start_angle);
                 if angle_delta * wh.scale * N >= 1.0 {
                     if let Some(subdir_entry_past) = subdir_entry_carry {
-                        draw_dir_entry(graphics, subdir_entry_past, wh, distance + 1, angle, angle + angle_delta_carry, true, false);
+                        draw_dir_entry(graphics, subdir_entry_past, wh, distance + 1, angle, angle + angle_delta_carry, false);
                         angle += angle_delta_carry;
                         angle_delta_carry = 0.0;
                         subdir_entry_carry = None;
                     }
-                    draw_dir_entry(graphics, &subdir_entry, wh, distance + 1, angle, angle + angle_delta, true, true);
+                    draw_dir_entry(graphics, &subdir_entry, wh, distance + 1, angle, angle + angle_delta, true);
                     angle += angle_delta;
                 } else {
                     angle_delta_carry += angle_delta;
@@ -189,7 +189,7 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindow
                         subdir_entry_carry = Some(subdir_entry);
                     }
                     if angle_delta_carry * wh.scale * N >= 1.0 {
-                        draw_dir_entry(graphics, subdir_entry_carry.unwrap_or(subdir_entry), wh, distance + 1, angle, angle + angle_delta_carry, true, false);
+                        draw_dir_entry(graphics, subdir_entry_carry.unwrap_or(subdir_entry), wh, distance + 1, angle, angle + angle_delta_carry, false);
                         angle += angle_delta_carry;
                         angle_delta_carry = 0.0;
                         subdir_entry_carry = None;
@@ -226,7 +226,7 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindow
         thickness, Color::BLACK);
     }
     
-    if dir_borders && dir_entry.subdir.is_some() {
+    if dir_entry.subdir.is_some() && !(start_angle == 0.0 && end_angle == 2.0*PI) {
         let thickness = (0.2 * (end_angle - start_angle) * wh.scale * N).clamp(0.0, 4.0);
         graphics.draw_line(
             wh.center_pos,
@@ -449,7 +449,7 @@ impl WindowHandler for MyWindowHandler {
         graphics.clear_screen(Color::DARK_GRAY);
         reset_color_count();
         
-        draw_dir_entry(graphics, current_node, self, 1, 0.0, 2.0*PI, false, true);
+        draw_dir_entry(graphics, current_node, self, 1, 0.0, 2.0*PI, true);
         
         for angle in 0..360 {
             let angle = angle as f32 * PI/180.0;

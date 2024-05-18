@@ -6,6 +6,7 @@ use std::io::Error;
 use std::sync::{Arc, Mutex};
 use speedy2d::color::Color;
 use speedy2d::dimen::{UVec2, Vec2};
+use speedy2d::font::{Font, TextLayout, TextOptions};
 use speedy2d::shape::Polygon;
 use speedy2d::window::{MouseButton, MouseScrollDistance, WindowHandler, WindowHelper};
 use speedy2d::{Graphics2D, Window};
@@ -242,6 +243,7 @@ fn draw_dir_entry(graphics: &mut Graphics2D, dir_entry: &DirEntry, wh: &MyWindow
 
 struct MyWindowHandler {
     root: DirEntry,
+    font: Font,
     center_pos: Vec2,
     scale: f32,
     mouse_left: bool,
@@ -330,8 +332,30 @@ impl MyWindowHandler {
                 self.cull_max_angle = angles[3];
             }
         }
+    }
+    
+    fn find_file(&self, dir_entry: &DirEntry, select_angle: f32, select_radius: f32, distance: u32, start_angle: f32, end_angle: f32) -> String {
+        let radius = match dir_entry.subdir.is_some() {
+            true => N - N * f32::powi((N-1.0) / N, distance as i32),
+            false => N
+        };
         
+        if select_radius < radius {
+            return dir_entry.name.clone()
+        }
         
+        if let Some(subdir_entries) = &dir_entry.subdir {
+            let mut angle = start_angle;
+            for subdir_entry in subdir_entries {
+                let angle_delta = subdir_entry.size as f32 / dir_entry.size as f32 * (end_angle - start_angle);
+                if angle + angle_delta > select_angle {
+                    return dir_entry.name.clone() + "\\" + &self.find_file(subdir_entry, select_angle, select_radius, distance + 1, angle, angle + angle_delta)
+                }
+                angle += angle_delta;
+            }
+        }
+        
+        return dir_entry.name.clone()
     }
 }
 
@@ -393,6 +417,15 @@ impl WindowHandler for MyWindowHandler {
             0.05 * self.scale, Color::BLACK);
         }
         
+        let mouse_angle = f32::atan2(self.mouse_pos.y - self.center_pos.y, self.mouse_pos.x - self.center_pos.x);
+        let mouse_angle = if mouse_angle < 0.0 { mouse_angle + 2.0*PI } else { mouse_angle };
+        let mouse_radius = (self.mouse_pos - self.center_pos).magnitude() / self.scale;
+        
+        if mouse_radius <= N {
+            let file_name = self.find_file(&self.root, mouse_angle, mouse_radius, 1, 0.0, 2.0*PI);
+            graphics.draw_text((12.0, self.window_size.y as f32 - 36.0), Color::WHITE, &self.font.layout_text(&file_name, 30.0, TextOptions::new()));
+        }
+        
         helper.request_redraw();
     }
 }
@@ -402,7 +435,7 @@ impl WindowHandler for MyWindowHandler {
 
 
 fn main() {
-    let window_size = UVec2::new(1000, 1000);
+    let window_size = UVec2::new(800, 800);
     let window = Window::new_centered("Disk Pie", window_size).unwrap();
     
     let root_folder = "C:\\";
@@ -417,6 +450,7 @@ fn main() {
                 subdir: Some(dirs)
             }
         },
+        font: Font::new(include_bytes!("OpenSans-Regular.ttf")).unwrap(),
         center_pos: Vec2::new(window_size.x as f32 / 2.0, window_size.y as f32 / 2.0),
         scale: window_size.y as f32 / 12.0,
         mouse_left: false,
